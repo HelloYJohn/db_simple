@@ -3,7 +3,7 @@ use std::cmp::PartialEq;
 use std::io::Write;
 use crate::ExecuteResult::{ExecuteSuccess, ExecuteTableFull};
 use crate::MetaCommandResult::{MetaCommandSuccess, MetaCommandUnrecognizedCommand};
-use crate::PrepareResult::{PrepareSuccess, PrepareSyntaxError, PrepareUnrecognizedStatement};
+use crate::PrepareResult::{PrepareNegativeId, PrepareStringTooLong, PrepareSuccess, PrepareSyntaxError, PrepareUnrecognizedStatement};
 use crate::StatementType::{StatementInsert, StatementNone, StatementSelect};
 
 ///String -> [u8;_]
@@ -214,6 +214,12 @@ impl Statement {
             sscanf::sscanf!(input_buffer.buffer, "insert {usize} {str} {str}");
         if row.is_ok() {
             let (id,username, email) = row.unwrap();
+            if id < 0 {
+                return PrepareNegativeId;
+            }
+            if username.len() > COLUMN_USERNAME_SIZE || email.len() > COLUMN_EMAIL_SIZE {
+                return PrepareStringTooLong;
+            }
             self.row_to_insert.id = id;
             self.row_to_insert.username = string_to_array!(username, COLUMN_USERNAME_SIZE);
             self.row_to_insert.email = string_to_array!(email, COLUMN_EMAIL_SIZE);
@@ -284,8 +290,12 @@ fn main() {
                 println!("Syntax error. Could not parse statement.");
                 continue;
             }
-            _ => {
-                println!("other error");
+            PrepareNegativeId => {
+                println!("ID must be positive.");
+                continue;
+            }
+            PrepareStringTooLong=> {
+                println!("String is too long.");
                 continue;
             }
         }
