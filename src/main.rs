@@ -1,5 +1,4 @@
 use std::{env, io, mem};
-use std::cmp::PartialEq;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -69,6 +68,7 @@ enum StatementType {
     StatementSelect,
     StatementNone,
 }
+#[derive(Debug)]
 struct InputBuffer {
     buffer : String,
 }
@@ -125,7 +125,7 @@ struct Pager {
 }
 
 impl Pager {
-    fn page_open(filename : &str) -> Pager {
+    fn pager_open(filename : &str) -> Pager {
         let path = Path::new(filename);
         let file = OpenOptions::new()
             .create(true)
@@ -203,7 +203,7 @@ struct Table {
 
 impl Table {
     fn db_open(filename : &str) -> Self {
-        let pager = Pager::page_open(filename);
+        let pager = Pager::pager_open(filename);
         let num_rows = (pager.file_length / ROW_SIZE) as usize;
         Self {
             num_rows : num_rows,
@@ -216,7 +216,7 @@ impl Table {
 
         for i in 0..num_full_pages {
             let page = self.pager.pages[i];
-            if (page.is_none()) {
+            if page.is_none() {
                 continue;
             }
             self.pager.pager_flush(i, PAGE_SIZE);
@@ -231,27 +231,17 @@ impl Table {
         }
     }
 
-
-    fn row_slot(&mut self, row_num :usize) -> (usize, usize) {
-        let page_num = row_num / ROWS_PER_PAGE;
-        self.pager.get_page(page_num);
-
-        let row_offset = row_num % ROWS_PER_PAGE;
-        let byte_offset = row_offset * ROW_SIZE;
-
-        (page_num, byte_offset)
-    }
-
     fn execute_insert(&mut self, statement : &mut Statement) -> ExecuteResult {
         if self.num_rows >= TABLE_MAX_ROWS {
             return ExecuteTableFull;
         }
 
         let row = &statement.row_to_insert;
+        let mut cursor = Cursor::table_end(self);
 
         let info = unsafe { serialize_struct(row) };
 
-        let (page_index, byte_offset) = self.row_slot(self.num_rows);
+        let (page_index, byte_offset) = cursor.cursor_value();
         if let Some(Some(page)) = self.pager.pages.get_mut(page_index) {
             //参考: https://stackoverflow.com/questions/45081768/efficiently-copy-non-overlapping-slices-of-the-same-vector-in-rust?noredirect=1&lq=1
             page.0[byte_offset..(byte_offset + ROW_SIZE)].clone_from_slice(&info[..])
@@ -262,28 +252,61 @@ impl Table {
     }
 
     fn execute_select(&mut self) -> ExecuteResult {
-        for i in 0..self.num_rows {
-            let (page_offset, bytes_offset) = self.row_slot(i);
-            // let row = self.pages[page_offset].unwrap().0[bytes_offset..(bytes_offset + ROW_SIZE)].to_vec();
-            let row = self.pager.pages[page_offset].unwrap().0[bytes_offset..(bytes_offset + ROW_SIZE)].to_vec();
+        let mut cursor = Cursor::table_start(self);
+        while !cursor.end_of_table {
+            let (page_offset, bytes_offset) = cursor.cursor_value();
+            let row = cursor.table.pager.pages[page_offset].unwrap().0[bytes_offset..(bytes_offset + ROW_SIZE)].to_vec();
             // let row = self.pages[page_offset].unwrap().map(|x| x.0[bytes_offset..(bytes_offset + ROW_SIZE)].to_vec());
             let row: Row = unsafe { deserialize_struct(row) };
-
-            let trim_elems: [char; 1] = ['\0'];
-            let username = String::from_utf8(row.username.to_vec()).expect("Error");
-            let username = username.trim_end_matches(&trim_elems);
-            let email = String::from_utf8(row.email.to_vec()).expect("Error");
-            let email = email.trim_end_matches(&trim_elems);
-
-            println!(
-                "{} {:?} {:?}",
-                row.id,
-                username,
-                email
-            );
+            print_row(row);
+            cursor.cursor_advance();
         }
 
         return ExecuteSuccess;
+    }
+}
+
+struct Cursor<'a> {
+    table : &'a mut Table,
+    row_num : usize,
+    end_of_table : bool,
+}
+
+impl <'a> Cursor<'a> {
+    fn table_start(table: &'a mut Table) -> Cursor {
+        let end_of_table = table.num_rows == 0;
+        Cursor {
+            table,
+            row_num: 0,
+            end_of_table: end_of_table,
+        }
+    }
+
+    fn table_end(table: &'a mut Table) -> Cursor {
+        let row_num = table.num_rows;
+        Cursor {
+            table,
+            row_num: row_num,
+            end_of_table: true,
+        }
+    }
+
+    fn cursor_value(&mut self) -> (usize, usize) {
+        let row_num = self.row_num;
+        let page_num = row_num / ROWS_PER_PAGE;
+        self.table.pager.get_page(page_num);
+
+        let row_offset = row_num % ROWS_PER_PAGE;
+        let byte_offset = row_offset * ROW_SIZE;
+
+        (page_num, byte_offset)
+    }
+
+    fn cursor_advance(&mut self) {
+        self.row_num += 1;
+        if self.row_num >= self.table.num_rows {
+            self.end_of_table = true;
+        }
     }
 }
 
@@ -301,11 +324,22 @@ fn read_input() -> InputBuffer {
     };
 }
 
-fn print_row(row : &Row) {
-    println!("({}, {:?}, {:?})", row.id, row.username, row.email);
+fn print_row(row : Row) {
+    let trim_elems: [char; 1] = ['\0'];
+    let username = String::from_utf8(row.username.to_vec()).expect("Error");
+    let username = username.trim_end_matches(&trim_elems);
+    let email = String::from_utf8(row.email.to_vec()).expect("Error");
+    let email = email.trim_end_matches(&trim_elems);
+
+    println!(
+        "{} {:?} {:?}",
+        row.id,
+        username,
+        email
+    );
 }
 
-fn do_meta_command(input_buffer : InputBuffer, table: &mut Table) -> MetaCommandResult {
+fn do_meta_command(input_buffer : &InputBuffer, table: &mut Table) -> MetaCommandResult {
     if input_buffer.buffer == ".exit" {
         table.db_close();
         exit(0);
@@ -332,9 +366,7 @@ impl Statement {
             sscanf::sscanf!(input_buffer.buffer, "insert {usize} {str} {str}");
         if row.is_ok() {
             let (id,username, email) = row.unwrap();
-            if id < 0 {
-                return PrepareNegativeId;
-            }
+
             if username.len() > COLUMN_USERNAME_SIZE || email.len() > COLUMN_EMAIL_SIZE {
                 return PrepareStringTooLong;
             }
@@ -382,13 +414,11 @@ fn main() {
     loop {
         print_prompt();
         let input_buffer = read_input();
-        let buffer = input_buffer.buffer.clone();
-        let first_char = &input_buffer.buffer[0..1];
-        if first_char.eq(".") {
-            match do_meta_command(input_buffer, &mut table) {
+        if input_buffer.buffer.starts_with(".") {
+            match do_meta_command(&input_buffer, &mut table) {
                 MetaCommandSuccess => {continue;}
                 MetaCommandUnrecognizedCommand => {
-                    println!("Unrecognized command {}", buffer);
+                    println!("Unrecognized command {:?}", input_buffer.buffer);
                     continue;
                 }
             }
