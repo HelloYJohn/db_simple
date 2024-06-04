@@ -1,4 +1,4 @@
-use std::{env, io, mem};
+use std::{env, io, mem, process};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -12,22 +12,10 @@ use crate::StatementType::{StatementInsert, StatementNone, StatementSelect};
 ///String -> [u8;_]
 #[macro_export]
 macro_rules! string_to_array {
-    ($string:expr, $array_length:expr) => {{
+    ($string:expr, $array_length: expr) => {{
         let mut array = [0u8; $array_length];
 
         for (&x, p) in $string.as_bytes().iter().zip(array.iter_mut()) {
-            *p = x;
-        }
-        array
-    }};
-}
-
-#[macro_export]
-macro_rules! array_to_array {
-    ($src:expr, $array_length:expr) => {{
-        let mut array = [0u8; $array_length];
-
-        for (&x, p) in $src.iter().zip(array.iter_mut()) {
             *p = x;
         }
         array
@@ -68,6 +56,11 @@ enum StatementType {
     StatementSelect,
     StatementNone,
 }
+
+enum NodeType {
+    NodeInternal,
+    NodeLeaf,
+}
 #[derive(Debug)]
 struct InputBuffer {
     buffer : String,
@@ -96,19 +89,44 @@ impl Row {
         }
     }
 }
-const ID_SIZE:usize = 4;
+const ID_SIZE:usize = std::mem::size_of::<usize>();
 const USERNAME_SIZE:usize = 32;
 const EMAIL_SIZE:usize = 255;
+
+const ID_OFFSET: usize = 0;
+const USERNAME_OFFSET: usize = ID_OFFSET + ID_SIZE;
+const EMAIL_OFFSET: usize = USERNAME_OFFSET + USERNAME_SIZE;
 // const ROW_SIZE:usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 const ROW_SIZE:usize = mem::size_of::<Row>();
 const PAGE_SIZE:usize = 4096;
 const TABLE_MAX_PAGES:usize = 100;
-const ROWS_PER_PAGE:usize = PAGE_SIZE / ROW_SIZE;
-const TABLE_MAX_ROWS:usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
-// struct Page {
-//     buffer : [u8; PAGE_SIZE],
-// }
+const NODE_TYPE_SIZE:usize = mem::size_of::<NodeType>();
+const NODE_TYPE_OFFSET:usize = 0;
+const IS_ROOT_SIZE:usize = mem::size_of::<bool>();
+const IS_ROOT_OFFSET:usize = NODE_TYPE_SIZE;
+const PARENT_POINTER_SIZE:usize = mem::size_of::<usize>();
+const PARENT_POINTER_OFFSET:usize = IS_ROOT_OFFSET + IS_ROOT_SIZE;
+const COMMON_NODE_HEADER_SIZE:usize = NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE;
+
+/*
+ * Leaf Node Header Layout
+*/
+const LEAF_NODE_NUM_CELLS_SIZE:usize = mem::size_of::<usize>();
+const LEAF_NODE_NUM_CELLS_OFFSET:usize = COMMON_NODE_HEADER_SIZE;
+const LEAF_NODE_HEADER_SIZE:usize = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+
+/*
+ * Leaf Node Body Layout
+ */
+const LEAF_NODE_KEY_SIZE:usize = mem::size_of::<usize>();
+const LEAF_NODE_KEY_OFFSET:usize = 0;
+const LEAF_NODE_VALUE_SIZE:usize = ROW_SIZE;
+const LEAF_NODE_VALUE_OFFSET:usize = LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
+const LEAF_NODE_CELL_SIZE:usize = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
+const LEAF_NODE_SPACE_FOR_CELLS:usize = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
+const LEAF_NODE_MAX_CELLS:usize = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
+
 #[derive(Clone, Copy)]
 struct Page([u8; PAGE_SIZE]);
 
@@ -116,11 +134,70 @@ impl Page {
     fn new() -> Self {
         Self ([0u8; PAGE_SIZE])
     }
+
+    unsafe fn row_mut_slot(&mut self, cell_num: usize) -> Row {
+        fn read_end_idx(bytes: &[u8]) -> usize {
+            for i in (0..bytes.len()).rev() {
+                if bytes[i] != 0 {
+                    return i;
+                }
+            }
+            0
+        }
+        let cell = self.leaf_node_value(cell_num);
+
+        let id = std::ptr::read(cell as *const usize);
+        let username_bytes = std::ptr::read((cell as usize + USERNAME_OFFSET) as *const [u8; USERNAME_SIZE]);
+        let email_bytes = std::ptr::read((cell as usize + EMAIL_OFFSET) as *const [u8; EMAIL_SIZE]);
+
+        Row {
+            id,
+            username: username_bytes,
+            email: email_bytes,
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        unsafe {
+            (*self.leaf_node_num_cells()) >= LEAF_NODE_MAX_CELLS
+        }
+    }
+
+    fn index(&self, offset: usize) ->isize {
+        let ptr = self.0.as_ptr();
+        unsafe {
+            ((ptr as isize).checked_add(offset as isize).unwrap() + 7) / 8 * 8
+        }
+    }
+
+    fn leaf_node_num_cells(&self) -> *mut usize {
+        self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize
+    }
+
+    fn leaf_node_cell(&self, cell_num: usize) -> *const u8 {
+        (self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE)) as *const u8
+    }
+
+    fn leaf_node_key(&self, cell_num: usize) -> *mut usize {
+        self.leaf_node_cell(cell_num) as *mut usize
+    }
+
+    fn leaf_node_value(&self, cell_num: usize) -> *mut u8 {
+        self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE + LEAF_NODE_KEY_SIZE) as *mut u8
+    }
+
+    fn initialize_leaf_node(&self) {
+        let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
+        unsafe {
+            *ptr = 0;
+        }
+    }
 }
 
 struct Pager {
-    file : File,
+    file_descriptor: File,
     file_length : usize,
+    num_pages : usize,
     pages : [Option<Page>; TABLE_MAX_PAGES],
 }
 
@@ -133,16 +210,32 @@ impl Pager {
             .read(true)
             .open(path)
             .unwrap();
-        let metadata = file.metadata().unwrap();
-        let file_lenth = metadata.len() as usize;
-        Pager {
-            file: file,
-            file_length: file_lenth,
-            pages: [None; TABLE_MAX_PAGES],
+
+        let file_lenth = file.metadata().unwrap().len() as usize;
+        let num_pages = file_lenth / PAGE_SIZE;
+
+        if file_lenth % PAGE_SIZE != 0 {
+            println!("Db file is not a whole number of pages. Corrupt file.");
+            exit(-1);
         }
+
+        let mut pager = Pager {
+            file_descriptor: file,
+            file_length: file_lenth,
+            num_pages: num_pages,
+            pages: [None; TABLE_MAX_PAGES],
+        };
+
+        if pager.num_pages == 0 {
+            unsafe {
+                let root_node = pager.get_page(0);
+                root_node.initialize_leaf_node();
+            }
+        }
+        return pager;
     }
 
-    fn get_page(&mut self, page_num :usize) -> Option<Page> {
+    fn get_page(&mut self, page_num :usize) -> &mut Page {
         if page_num >= TABLE_MAX_PAGES {
             println!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
             exit(-1);
@@ -153,100 +246,90 @@ impl Pager {
             let num_pages = (self.file_length + PAGE_SIZE - 1) / PAGE_SIZE;
 
             if page_num <= num_pages {
-                let res = self.file.seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64));
+                let res = self.file_descriptor.seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64));
 
                 if res.is_err() {
                     println!("Error seeking file {:?}", res);
+                    exit(-1);
                 }
 
-                let res = self.file.read(&mut page.0[..]);
+                let res = self.file_descriptor.read(&mut page.0);
                 if res.is_err() {
                     println!("Error reading file {:?}", res);
+                    exit(-1);
                 }
             }
 
             self.pages[page_num] = Some(page);
+
+            if page_num >= self.num_pages {
+                self.num_pages = page_num + 1;
+            }
         }
-        self.pages[page_num]
+
+        self.pages[page_num].as_mut().unwrap()
     }
 
-    fn pager_flush(&mut self, page_num: usize, size: usize) {
+    fn pager_flush(&mut self, page_num: usize) {
         let page = self.pages[page_num];
         if page.is_none() {
             println!("Tried to flush null page");
             exit(-1);
         }
 
-        let offset = self.file.seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64));
+        let offset = self.file_descriptor.seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64));
         if offset.is_err() {
             println!("Error seeking file {:?}", offset);
             exit(-1);
         }
 
-        let mut buf = vec![];
-        for i in 0..size {
-            buf.push(page.unwrap().0[i]);
-        }
-
-        let bytes_written = self.file.write(buf.as_slice());
-        let flush = self.file.flush();
+        let bytes_written = self.file_descriptor.write(&page.unwrap().0);
+        let flush = self.file_descriptor.flush();
         if bytes_written.is_err() || flush.is_err() {
             println!("Error writing: {:?}, {:?}", bytes_written, flush);
+            exit(-1);
         }
     }
 }
 
 struct Table {
-    num_rows: usize,
     pager: Pager,
+    root_page_num : usize,
 }
 
 impl Table {
     fn db_open(filename : &str) -> Self {
         let pager = Pager::pager_open(filename);
-        let num_rows = (pager.file_length / ROW_SIZE) as usize;
+
         Self {
-            num_rows : num_rows,
             pager: pager,
+            root_page_num: 0,
         }
     }
 
     fn db_close(&mut self) {
-        let num_full_pages = self.num_rows / ROWS_PER_PAGE;
+        let mut pager = &self.pager;
 
-        for i in 0..num_full_pages {
+        for i in 0..pager.num_pages {
             let page = self.pager.pages[i];
             if page.is_none() {
                 continue;
             }
-            self.pager.pager_flush(i, PAGE_SIZE);
-        }
-
-        let num_addition_rows = self.num_rows % ROWS_PER_PAGE;
-        if num_addition_rows > 0 {
-            let page_num = num_full_pages;
-            if self.pager.pages[page_num].is_some() {
-                self.pager.pager_flush(page_num, num_addition_rows * ROW_SIZE);
-            }
+            self.pager.pager_flush(i);
         }
     }
 
     fn execute_insert(&mut self, statement : &mut Statement) -> ExecuteResult {
-        if self.num_rows >= TABLE_MAX_ROWS {
-            return ExecuteTableFull;
-        }
-
         let row = &statement.row_to_insert;
+        unsafe {
+            let page = self.pager.get_page(self.root_page_num);
+            if page.is_full() {
+                return ExecuteTableFull;
+            }
+        }
         let mut cursor = Cursor::table_end(self);
 
-        let info = unsafe { serialize_struct(row) };
-
-        let (page_index, byte_offset) = cursor.cursor_value();
-        if let Some(Some(page)) = self.pager.pages.get_mut(page_index) {
-            //参考: https://stackoverflow.com/questions/45081768/efficiently-copy-non-overlapping-slices-of-the-same-vector-in-rust?noredirect=1&lq=1
-            page.0[byte_offset..(byte_offset + ROW_SIZE)].clone_from_slice(&info[..])
-        }
-        self.num_rows += 1;
+        unsafe { cursor.leaf_node_insert((*row).id as usize, row) };
 
         return ExecuteSuccess;
     }
@@ -254,10 +337,7 @@ impl Table {
     fn execute_select(&mut self) -> ExecuteResult {
         let mut cursor = Cursor::table_start(self);
         while !cursor.end_of_table {
-            let (page_offset, bytes_offset) = cursor.cursor_value();
-            let row = cursor.table.pager.pages[page_offset].unwrap().0[bytes_offset..(bytes_offset + ROW_SIZE)].to_vec();
-            // let row = self.pages[page_offset].unwrap().map(|x| x.0[bytes_offset..(bytes_offset + ROW_SIZE)].to_vec());
-            let row: Row = unsafe { deserialize_struct(row) };
+            let row = cursor.cursor_value();
             print_row(row);
             cursor.cursor_advance();
         }
@@ -268,45 +348,83 @@ impl Table {
 
 struct Cursor<'a> {
     table : &'a mut Table,
-    row_num : usize,
+    page_num : usize,
+    cell_num : usize,
     end_of_table : bool,
 }
 
 impl <'a> Cursor<'a> {
     fn table_start(table: &'a mut Table) -> Cursor {
-        let end_of_table = table.num_rows == 0;
+        let root_page_num = table.root_page_num;
+        let root_node = unsafe { table.pager.get_page(root_page_num) };
+        let num_cells = unsafe { *((*root_node).leaf_node_num_cells()) };
         Cursor {
             table,
-            row_num: 0,
-            end_of_table: end_of_table,
+            page_num : root_page_num,
+            cell_num : 0,
+            end_of_table: num_cells == 0,
         }
     }
 
     fn table_end(table: &'a mut Table) -> Cursor {
-        let row_num = table.num_rows;
+        let root_page_num = table.root_page_num;
+        let root_node = unsafe { table.pager.get_page(root_page_num) };
+        let num_cells = unsafe { *((*root_node).leaf_node_num_cells()) };
         Cursor {
             table,
-            row_num: row_num,
+            page_num : root_page_num,
+            cell_num : num_cells,
             end_of_table: true,
         }
     }
 
-    fn cursor_value(&mut self) -> (usize, usize) {
-        let row_num = self.row_num;
-        let page_num = row_num / ROWS_PER_PAGE;
-        self.table.pager.get_page(page_num);
-
-        let row_offset = row_num % ROWS_PER_PAGE;
-        let byte_offset = row_offset * ROW_SIZE;
-
-        (page_num, byte_offset)
+    fn cursor_value(&mut self) -> Row {
+        let page = self.table.pager.get_page(self.page_num);
+        let cell_num = self.cell_num;
+        unsafe { page.row_mut_slot(cell_num) }
     }
 
     fn cursor_advance(&mut self) {
-        self.row_num += 1;
-        if self.row_num >= self.table.num_rows {
-            self.end_of_table = true;
+        let page = self.table.pager.get_page(self.page_num);
+        self.cell_num += 1;
+        unsafe {
+            if self.cell_num >= *((*page).leaf_node_num_cells()) {
+                self.end_of_table = true;
+            }
         }
+    }
+
+    unsafe fn leaf_node_insert(&mut self, key: usize, value: &Row) {
+        let cell_num = self.cell_num;
+        let page = self.table.pager.get_page(self.page_num);
+        let num_cells = page.leaf_node_num_cells();
+        if *num_cells > LEAF_NODE_MAX_CELLS {
+            println!("Need to implement splitting a leaf node.");
+            process::exit(-1);
+        }
+        if cell_num < *num_cells {
+            // shift cell from cell_num to num_cells to right to make room for new cell
+            for i in (cell_num + 1..=*num_cells).rev() {
+                std::ptr::copy_nonoverlapping(page.leaf_node_cell(i),
+                                              page.leaf_node_cell(i - 1) as *mut u8,
+                                              LEAF_NODE_CELL_SIZE);
+            }
+        }
+        (*num_cells) += 1;
+        *(page.leaf_node_key(cell_num)) = key;
+
+        let cell = page.leaf_node_value(cell_num);
+        self.serialize_row(cell, value);
+    }
+
+    unsafe fn serialize_row(&self, cell: *mut u8, source: &Row) {
+        std::ptr::write(cell as *mut usize, source.id as usize);
+
+        std::ptr::write((cell as usize + USERNAME_OFFSET) as *mut [u8; USERNAME_SIZE], [0u8; USERNAME_SIZE]);
+        std::ptr::copy(source.username.as_ptr(), (cell as usize + USERNAME_OFFSET) as *mut u8, source.username.len());
+
+        std::ptr::write((cell as usize + EMAIL_OFFSET) as *mut [u8; EMAIL_SIZE], [0 as u8; EMAIL_SIZE]);
+        std::ptr::copy(source.email.as_ptr(), (cell as usize + EMAIL_OFFSET) as *mut u8, source.email.len());
     }
 }
 
@@ -339,12 +457,29 @@ fn print_row(row : Row) {
     );
 }
 
+unsafe fn print_leaf_node(page : &mut Page) {
+    let num_cells = page.leaf_node_num_cells();
+    println!("leaf (size {})", *num_cells);
+    for i in 0..*num_cells {
+        let key = page.leaf_node_key(i);
+        println!("  - {} : {}", i, *key)
+    }
+}
 fn do_meta_command(input_buffer : &InputBuffer, table: &mut Table) -> MetaCommandResult {
-    if input_buffer.buffer == ".exit" {
-        table.db_close();
-        exit(0);
-    } else {
-        return MetaCommandUnrecognizedCommand;
+    match input_buffer.buffer.as_str() {
+        ".exit" => {
+            table.db_close();
+            exit(0);
+        }
+
+        ".btree" => unsafe {
+            println!("Tree: ");
+            print_leaf_node(table.pager.get_page(0));
+            return MetaCommandSuccess;
+        }
+        _ => {
+            return MetaCommandUnrecognizedCommand;
+        }
     }
 }
 

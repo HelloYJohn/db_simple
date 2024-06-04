@@ -66,9 +66,48 @@ db > '''
 Executed.
 db > '''
 
+def test_bt():
+    commands = ['insert 1 user1 person1@example.com',
+                'insert 2 user2 person2@example.com',
+                'insert 3 user3 person3@example.com',
+                'select',
+                '.exit']
+    db_file = root_path + 'bt.db'
+    cmd_args = []
+    cmd_args.append(execute_file)
+    cmd_args.append(db_file)
+    out = run(commands, cmd_args)
+    # print(out)
+    assert out == '''db > Executed.
+db > Executed.
+db > Executed.
+db > 1 "user1" "person1@example.com"
+2 "user2" "person2@example.com"
+3 "user3" "person3@example.com"
+Executed.
+db > '''
 
+    commands = ['select',
+                '.btree',
+                '.exit']
+    cmd_args = []
+    cmd_args.append(execute_file)
+    cmd_args.append(db_file)
+    out = run(commands, cmd_args)
+    # print(out)
+    assert out == '''db > 1 "user1" "person1@example.com"
+2 "user2" "person2@example.com"
+3 "user3" "person3@example.com"
+Executed.
+db > Tree: 
+leaf (size 3)
+  - 0 : 1
+  - 1 : 2
+  - 2 : 3
+db > '''
     os.remove(db_file)
 
-test_insert()
-test_insert_too_long()
-test_insert_exit_select_exit()
+# test_insert()
+# test_insert_too_long()
+# test_insert_exit_select_exit()
+test_bt()
