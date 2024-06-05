@@ -4,8 +4,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::exit;
 
-use crate::ExecuteResult::{ExecuteSuccess, ExecuteTableFull};
+use crate::ExecuteResult::{ExecuteDuplicateKey, ExecuteSuccess, ExecuteTableFull};
 use crate::MetaCommandResult::{MetaCommandSuccess, MetaCommandUnrecognizedCommand};
+use crate::NodeType::NodeLeaf;
 use crate::PrepareResult::{PrepareNegativeId, PrepareStringTooLong, PrepareSuccess, PrepareSyntaxError, PrepareUnrecognizedStatement};
 use crate::StatementType::{StatementInsert, StatementNone, StatementSelect};
 
@@ -35,7 +36,7 @@ pub unsafe fn deserialize_struct<T: Sized>(src: Vec<u8>) -> T {
 enum ExecuteResult {
     ExecuteSuccess,
     ExecuteTableFull,
-    ExecuteFail,
+    ExecuteDuplicateKey,
 }
 
 enum MetaCommandResult {
@@ -159,37 +160,63 @@ impl Page {
 
     fn is_full(&self) -> bool {
         unsafe {
-            (*self.leaf_node_num_cells()) >= LEAF_NODE_MAX_CELLS
+            self.leaf_node_num_cells() >= LEAF_NODE_MAX_CELLS
         }
     }
 
     fn index(&self, offset: usize) ->isize {
         let ptr = self.0.as_ptr();
         unsafe {
-            ((ptr as isize).checked_add(offset as isize).unwrap() + 7) / 8 * 8
+            (ptr as isize).checked_add(offset as isize).unwrap()
         }
     }
 
-    fn leaf_node_num_cells(&self) -> *mut usize {
+    unsafe fn leaf_node_mut_num_cells(&self) -> *mut usize {
         self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize
+    }
+
+    fn set_leaf_node_num_cells(&mut self, num_cells: usize) {
+        unsafe {
+            *self.leaf_node_mut_num_cells() = num_cells
+        }
+    }
+
+    fn leaf_node_num_cells(&self) -> usize {
+        unsafe {*self.leaf_node_mut_num_cells()}
     }
 
     fn leaf_node_cell(&self, cell_num: usize) -> *const u8 {
         (self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE)) as *const u8
     }
 
-    fn leaf_node_key(&self, cell_num: usize) -> *mut usize {
-        self.leaf_node_cell(cell_num) as *mut usize
+    fn leaf_node_key(&self, cell_num: usize) -> usize {
+        unsafe { *(self.leaf_node_cell(cell_num) as *mut usize) }
+    }
+
+    fn set_leaf_node_key(&self, cell_num: usize, key : usize){
+        unsafe { *(self.leaf_node_cell(cell_num) as *mut usize) = key }
     }
 
     fn leaf_node_value(&self, cell_num: usize) -> *mut u8 {
         self.index(LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE + LEAF_NODE_KEY_SIZE) as *mut u8
     }
 
-    fn initialize_leaf_node(&self) {
-        let ptr = self.index(LEAF_NODE_NUM_CELLS_OFFSET) as *mut usize;
+    fn initialize_leaf_node(&mut self) {
+        self.set_node_type(NodeLeaf);
+        unsafe {*self.leaf_node_mut_num_cells() = 0;}
+    }
+
+    fn get_node_type<'a>(&self) -> &'a NodeType {
         unsafe {
-            *ptr = 0;
+            let ptr = self.index(NODE_TYPE_OFFSET) as *const NodeType;
+            return &*ptr;
+        }
+    }
+
+    fn set_node_type(&mut self, node_type: NodeType) {
+        unsafe {
+            let ptr = self.index(NODE_TYPE_OFFSET) as *mut NodeType;
+            return *ptr = node_type;
         }
     }
 }
@@ -235,7 +262,7 @@ impl Pager {
         return pager;
     }
 
-    fn get_page(&mut self, page_num :usize) -> &mut Page {
+    fn get_page(&mut self, page_num : usize) -> &mut Page {
         if page_num >= TABLE_MAX_PAGES {
             println!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
             exit(-1);
@@ -268,6 +295,14 @@ impl Pager {
         }
 
         self.pages[page_num].as_mut().unwrap()
+    }
+
+    fn get_page_view(&self, page_num: usize) -> Page {
+        if page_num > TABLE_MAX_PAGES {
+            panic!("Tried to fetch page number out of bounds. {} > {}", page_num, TABLE_MAX_PAGES);
+        }
+
+        self.pages[page_num].unwrap()
     }
 
     fn pager_flush(&mut self, page_num: usize) {
@@ -327,9 +362,25 @@ impl Table {
                 return ExecuteTableFull;
             }
         }
-        let mut cursor = Cursor::table_end(self);
 
-        unsafe { cursor.leaf_node_insert((*row).id as usize, row) };
+        let (page_num, cell_num) = Cursor::table_find(self, row.id);
+        let page = self.pager.get_page(page_num);
+
+        if cell_num < page.leaf_node_num_cells() {
+            let key_at_index = page.leaf_node_key(cell_num);
+            if key_at_index == row.id {
+                return ExecuteDuplicateKey;
+            }
+        }
+        let mut cursor = Cursor {
+            table : self,
+            page_num,
+            cell_num,
+            end_of_table: false
+        };
+        unsafe {
+            cursor.leaf_node_insert(row.id as usize, row);
+        }
 
         return ExecuteSuccess;
     }
@@ -344,6 +395,28 @@ impl Table {
 
         return ExecuteSuccess;
     }
+
+    fn leaf_node_find(&mut self, key: usize) -> (usize, usize) {
+        let page_num = self.root_page_num;
+        let page = self.pager.get_page(page_num);
+        let num_cells = page.leaf_node_num_cells();
+
+        let mut min_index = 0;
+        let mut one_past_max_index = num_cells;
+
+        while one_past_max_index != min_index {
+            let index = (min_index + one_past_max_index) / 2;
+            let key_at_index = page.leaf_node_key(index);
+            if key == key_at_index {
+                return (page_num, index);
+            } else if key < key_at_index {
+                one_past_max_index = index;
+            } else {
+                min_index = index + 1;
+            }
+        }
+        return (page_num, min_index);
+    }
 }
 
 struct Cursor<'a> {
@@ -356,8 +429,8 @@ struct Cursor<'a> {
 impl <'a> Cursor<'a> {
     fn table_start(table: &'a mut Table) -> Cursor {
         let root_page_num = table.root_page_num;
-        let root_node = unsafe { table.pager.get_page(root_page_num) };
-        let num_cells = unsafe { *((*root_node).leaf_node_num_cells()) };
+        let root_node = table.pager.get_page(root_page_num);
+        let num_cells = root_node.leaf_node_num_cells();
         Cursor {
             table,
             page_num : root_page_num,
@@ -366,15 +439,17 @@ impl <'a> Cursor<'a> {
         }
     }
 
-    fn table_end(table: &'a mut Table) -> Cursor {
-        let root_page_num = table.root_page_num;
-        let root_node = unsafe { table.pager.get_page(root_page_num) };
-        let num_cells = unsafe { *((*root_node).leaf_node_num_cells()) };
-        Cursor {
-            table,
-            page_num : root_page_num,
-            cell_num : num_cells,
-            end_of_table: true,
+    fn table_find(table: &'a mut Table, key : usize) -> (usize, usize) {
+        let root_node = table.pager.get_page(table.root_page_num);
+
+        match root_node.get_node_type() {
+            NodeType::NodeInternal => {
+                println!("Need to implement searching an internal node");
+                exit(-1);
+            }
+            NodeType::NodeLeaf => {
+                return table.leaf_node_find(key);
+            }
         }
     }
 
@@ -388,7 +463,7 @@ impl <'a> Cursor<'a> {
         let page = self.table.pager.get_page(self.page_num);
         self.cell_num += 1;
         unsafe {
-            if self.cell_num >= *((*page).leaf_node_num_cells()) {
+            if self.cell_num >= page.leaf_node_num_cells() {
                 self.end_of_table = true;
             }
         }
@@ -398,20 +473,20 @@ impl <'a> Cursor<'a> {
         let cell_num = self.cell_num;
         let page = self.table.pager.get_page(self.page_num);
         let num_cells = page.leaf_node_num_cells();
-        if *num_cells > LEAF_NODE_MAX_CELLS {
+        if num_cells > LEAF_NODE_MAX_CELLS {
             println!("Need to implement splitting a leaf node.");
             process::exit(-1);
         }
-        if cell_num < *num_cells {
+        if cell_num < num_cells {
             // shift cell from cell_num to num_cells to right to make room for new cell
-            for i in (cell_num + 1..=*num_cells).rev() {
-                std::ptr::copy_nonoverlapping(page.leaf_node_cell(i),
-                                              page.leaf_node_cell(i - 1) as *mut u8,
+            for i in (cell_num + 1..=num_cells).rev() {
+                std::ptr::copy_nonoverlapping(page.leaf_node_cell(i - 1),
+                                              page.leaf_node_cell(i) as *mut u8,
                                               LEAF_NODE_CELL_SIZE);
             }
         }
-        (*num_cells) += 1;
-        *(page.leaf_node_key(cell_num)) = key;
+        page.set_leaf_node_num_cells(num_cells + 1);
+        page.set_leaf_node_key(cell_num, key);
 
         let cell = page.leaf_node_value(cell_num);
         self.serialize_row(cell, value);
@@ -459,10 +534,10 @@ fn print_row(row : Row) {
 
 unsafe fn print_leaf_node(page : &mut Page) {
     let num_cells = page.leaf_node_num_cells();
-    println!("leaf (size {})", *num_cells);
-    for i in 0..*num_cells {
+    println!("leaf (size {})", num_cells);
+    for i in 0..num_cells {
         let key = page.leaf_node_key(i);
-        println!("  - {} : {}", i, *key)
+        println!("  - {} : {}", i, key)
     }
 }
 fn do_meta_command(input_buffer : &InputBuffer, table: &mut Table) -> MetaCommandResult {
@@ -530,15 +605,16 @@ impl Statement {
     fn execute_statement(&mut self, table : &mut Table) -> ExecuteResult {
         match self.kind {
             StatementInsert => {
-                table.execute_insert(self);
+                return table.execute_insert(self);
             }
             StatementSelect => {
-                table.execute_select();
+                return table.execute_select();
             }
 
-            _ => {}
+            _ => {
+                return ExecuteSuccess;
+            }
         }
-        return ExecuteSuccess;
     }
 }
 
@@ -563,12 +639,12 @@ fn main() {
             username: [0u8; COLUMN_USERNAME_SIZE],
             email: [0u8; COLUMN_EMAIL_SIZE],
         } };
-        let buffer = input_buffer.buffer.clone();
+
         match statement.prepare_statement(&input_buffer) {
             PrepareSuccess => {
             }
             PrepareUnrecognizedStatement => {
-                println!("Unrecognized keyword at start of '{}'.", buffer);
+                println!("Unrecognized keyword at start of '{}'.", &input_buffer.buffer);
                 continue;
             }
             PrepareSyntaxError => {
@@ -585,7 +661,17 @@ fn main() {
             }
         }
 
-        statement.execute_statement(&mut table);
-        println!("Executed.");
+        match statement.execute_statement(&mut table) {
+            ExecuteSuccess => {
+                println!("Executed.");
+            }
+            ExecuteTableFull => {
+                println!("Error: Table full.");
+            }
+            ExecuteResult::ExecuteDuplicateKey => {
+                println!("Error: Duplicate key.");
+            }
+        }
+
     }
 }

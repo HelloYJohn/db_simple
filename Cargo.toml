@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 sscanf = "0.4.1"
+
+[profile.dev]
+debug-assertions = false

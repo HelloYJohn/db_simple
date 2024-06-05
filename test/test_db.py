@@ -15,70 +15,83 @@ def run(commands, cmd_args):
     return out
 
 def test_insert():
-    commands = ['insert 1 user1 person1@example.com',
-                'select',
-                '.exit']
-    db_file = root_path + 'insert.db'
-    cmd_args = []
-    cmd_args.append(execute_file)
-    cmd_args.append(db_file)
-    out = run(commands, cmd_args)
-    assert out == '''db > Executed.
+    global db_file
+    try:
+        commands = ['insert 1 user1 person1@example.com',
+                    'select',
+                    '.exit']
+        db_file = root_path + 'insert.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        assert out == '''db > Executed.
 db > 1 "user1" "person1@example.com"
 Executed.
 db > '''
-    os.remove(db_file)
+    finally:
+        os.remove(db_file)
 
 def test_insert_too_long():
-    commands = ['insert 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b',
-                '.exit']
-    db_file = root_path + 'insert_too_long.db'
-    cmd_args = []
-    cmd_args.append(execute_file)
-    cmd_args.append(db_file)
-    out = run(commands, cmd_args)
-    assert out == '''db > String is too long.
+    global db_file
+    try:
+        commands = ['insert 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b',
+                    '.exit']
+        db_file = root_path + 'insert_too_long.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        assert out == '''db > String is too long.
 db > '''
-    os.remove(db_file)
+    finally:
+        os.remove(db_file)
 
 def test_insert_exit_select_exit():
-    commands = ['insert 1 user1 person1@example.com',
-                'select',
-                '.exit']
-    db_file = root_path + 'insert_exit_select_exit.db'
-    cmd_args = []
-    cmd_args.append(execute_file)
-    cmd_args.append(db_file)
-    out = run(commands, cmd_args)
-    assert out == '''db > Executed.
+    global db_file
+    try:
+        commands = ['insert 1 user1 person1@example.com',
+                    'select',
+                    '.exit']
+        db_file = root_path + 'insert_exit_select_exit.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > Executed.
 db > 1 "user1" "person1@example.com"
 Executed.
 db > '''
 
-    commands = ['select',
-                '.exit']
-    db_file = root_path + 'insert_exit_select_exit.db'
-    cmd_args = []
-    cmd_args.append(execute_file)
-    cmd_args.append(db_file)
-    out = run(commands, cmd_args)
-    assert out == '''db > 1 "user1" "person1@example.com"
+        commands = ['select',
+                    '.exit']
+        db_file = root_path + 'insert_exit_select_exit.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        assert out == '''db > 1 "user1" "person1@example.com"
 Executed.
 db > '''
+    finally:
+        os.remove(db_file)
 
 def test_bt():
-    commands = ['insert 1 user1 person1@example.com',
-                'insert 2 user2 person2@example.com',
-                'insert 3 user3 person3@example.com',
-                'select',
-                '.exit']
-    db_file = root_path + 'bt.db'
-    cmd_args = []
-    cmd_args.append(execute_file)
-    cmd_args.append(db_file)
-    out = run(commands, cmd_args)
-    # print(out)
-    assert out == '''db > Executed.
+    global db_file
+    try:
+        commands = ['insert 1 user1 person1@example.com',
+                    'insert 2 user2 person2@example.com',
+                    'insert 3 user3 person3@example.com',
+                    'select',
+                    '.exit']
+        db_file = root_path + 'bt.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > Executed.
 db > Executed.
 db > Executed.
 db > 1 "user1" "person1@example.com"
@@ -87,15 +100,15 @@ db > 1 "user1" "person1@example.com"
 Executed.
 db > '''
 
-    commands = ['select',
-                '.btree',
-                '.exit']
-    cmd_args = []
-    cmd_args.append(execute_file)
-    cmd_args.append(db_file)
-    out = run(commands, cmd_args)
-    # print(out)
-    assert out == '''db > 1 "user1" "person1@example.com"
+        commands = ['select',
+                    '.btree',
+                    '.exit']
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > 1 "user1" "person1@example.com"
 2 "user2" "person2@example.com"
 3 "user3" "person3@example.com"
 Executed.
@@ -105,9 +118,52 @@ leaf (size 3)
   - 1 : 2
   - 2 : 3
 db > '''
-    os.remove(db_file)
+    finally:
+        os.remove(db_file)
 
-# test_insert()
-# test_insert_too_long()
-# test_insert_exit_select_exit()
+def test_bs_dup():
+    global db_file
+    try :
+        commands = ['insert 1 user1 person1@example.com',
+                    'insert 5 user5 person5@example.com',
+                    'insert 2 user2 person2@example.com',
+                    'select',
+                    '.exit']
+        db_file = root_path + 'bin_dup.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > Executed.
+db > Executed.
+db > Executed.
+db > 1 "user1" "person1@example.com"
+2 "user2" "person2@example.com"
+5 "user5" "person5@example.com"
+Executed.
+db > '''
+
+        commands = ['select',
+                    'insert 1 user1 person1@example.com',
+                    '.exit']
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > 1 "user1" "person1@example.com"
+2 "user2" "person2@example.com"
+5 "user5" "person5@example.com"
+Executed.
+db > Error: Duplicate key.
+db > '''
+
+    finally:
+        os.remove(db_file)
+
+test_insert()
+test_insert_too_long()
+test_insert_exit_select_exit()
 test_bt()
+test_bs_dup()
