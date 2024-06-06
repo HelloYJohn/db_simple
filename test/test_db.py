@@ -113,10 +113,10 @@ db > '''
 3 "user3" "person3@example.com"
 Executed.
 db > Tree: 
-leaf (size 3)
-  - 0 : 1
-  - 1 : 2
-  - 2 : 3
+- leaf (size 3)
+ 1
+ 2
+ 3
 db > '''
     finally:
         os.remove(db_file)
@@ -162,8 +162,41 @@ db > '''
     finally:
         os.remove(db_file)
 
+def test_split():
+    global db_file
+    try :
+        commands = []
+        for i in range(1, 15):
+            commands.append(f"insert {i} user{i} person{i}example.com")
+
+        # print(commands)
+        db_file = root_path + 'split.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Need to implement updating parent after split
+'''
+    finally:
+        os.remove(db_file)
+
 test_insert()
 test_insert_too_long()
 test_insert_exit_select_exit()
 test_bt()
 test_bs_dup()
+test_split()
