@@ -171,7 +171,7 @@ def test_split():
         commands.append("select")
         commands.append(".exit")
         # print(commands)
-        db_file = root_path + 'split2.db'
+        db_file = root_path + 'split.db'
         cmd_args = []
         cmd_args.append(execute_file)
         cmd_args.append(db_file)
@@ -220,9 +220,65 @@ db > '''
     finally:
         os.remove(db_file)
 
+def test_split_internal():
+    global db_file
+    try :
+        commands = []
+        for i in range(1, 90):
+            commands.append(f"insert {i} user{i} person{i}@example.com")
+        commands.append("select")
+        commands.append(".exit")
+        # print(commands)
+        db_file = root_path + 'split_internal.db'
+        cmd_args = []
+        cmd_args.append(execute_file)
+        cmd_args.append(db_file)
+        out = run(commands, cmd_args)
+        # print(out)
+        assert out == '''db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Need to implement splitting internal node
+'''
+    finally:
+        os.remove(db_file)
+
 test_insert()
 test_insert_too_long()
 test_insert_exit_select_exit()
 test_bt()
 test_bs_dup()
 test_split()
+test_split_internal()
+
