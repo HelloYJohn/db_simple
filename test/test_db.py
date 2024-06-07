@@ -166,11 +166,12 @@ def test_split():
     global db_file
     try :
         commands = []
-        for i in range(1, 15):
-            commands.append(f"insert {i} user{i} person{i}example.com")
-
+        for i in range(1, 20):
+            commands.append(f"insert {i} user{i} person{i}@example.com")
+        commands.append("select")
+        commands.append(".exit")
         # print(commands)
-        db_file = root_path + 'split.db'
+        db_file = root_path + 'split2.db'
         cmd_args = []
         cmd_args.append(execute_file)
         cmd_args.append(db_file)
@@ -189,8 +190,33 @@ db > Executed.
 db > Executed.
 db > Executed.
 db > Executed.
-db > Need to implement updating parent after split
-'''
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > Executed.
+db > 1 "user1" "person1@example.com"
+2 "user2" "person2@example.com"
+3 "user3" "person3@example.com"
+4 "user4" "person4@example.com"
+5 "user5" "person5@example.com"
+6 "user6" "person6@example.com"
+7 "user7" "person7@example.com"
+8 "user8" "person8@example.com"
+9 "user9" "person9@example.com"
+10 "user10" "person10@example.com"
+11 "user11" "person11@example.com"
+12 "user12" "person12@example.com"
+13 "user13" "person13@example.com"
+14 "user14" "person14@example.com"
+15 "user15" "person15@example.com"
+16 "user16" "person16@example.com"
+17 "user17" "person17@example.com"
+18 "user18" "person18@example.com"
+19 "user19" "person19@example.com"
+Executed.
+db > '''
     finally:
         os.remove(db_file)
 
